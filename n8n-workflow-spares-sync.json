@@ -1,0 +1,450 @@
+{
+  "name": "Spares sync (student)",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "3f565b98-4857-4dbd-8e87-97f1c9f942a8"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "baseUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "username",
+              "value": "STUDENT_LOGIN",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "password",
+              "value": "STUDENT_PASSWORD",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        0
+      ],
+      "id": "a17cbf72-fa27-4870-ae39-7b1238161056"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS spares (\n  spare_code        text PRIMARY KEY,\n  spare_name        text,\n  spare_description text,\n  spare_type        text,\n  spare_status      text,\n  price             text,\n  quantity          integer,\n  updated_at        text,\n  first_seen_at     timestamptz DEFAULT now(),\n  last_seen_at      timestamptz,\n  is_active         boolean DEFAULT true\n);",
+        "options": {}
+      },
+      "name": "Create Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        448,
+        0
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "id": "1db1b985-9da6-44f4-bc9b-eb12474e9916",
+      "credentials": {
+        "postgres": {
+          "id": "wCBhNZY6XsRDKwQT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Config').first().json;\nconst base = cfg.baseUrl.replace(/\\/$/, '');\nconst startedAt = new Date().toISOString();\nlet token = null;\nlet lastErr = null;\n// В описании API указан /auth/login, в Swagger виден /auth/token - пробуем оба\nfor (const path of ['/auth/login', '/auth/token']) {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST',\n      url: base + path,\n      body: { username: cfg.username, password: cfg.password },\n      json: true,\n    });\n    if (res && res.token) { token = res.token; break; }\n  } catch (e) { lastErr = e; }\n}\nif (!token) {\n  throw new Error('Не удалось получить токен: ' + (lastErr ? lastErr.message : 'пустой ответ'));\n}\nreturn [{ json: { token, startedAt } }];"
+      },
+      "name": "Login",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "02df5ca3-3285-4a14-8634-18e34f8018ca"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('Config').first().json;\nconst { token, startedAt } = $('Login').first().json;\nconst base = cfg.baseUrl.replace(/\\/$/, '');\nconst SIZE = 10;\n\nconst basic = 'Basic ' + Buffer.from(cfg.username + ':' + cfg.password).toString('base64');\nconst toArr = d => Array.isArray(d) ? d : (d && Array.isArray(d.content) ? d.content : []);\nconst get = (authHeader, page) => this.helpers.httpRequest({\n  method: 'GET',\n  url: base + '/cms/spares',\n  qs: { page, size: SIZE },\n  headers: { Authorization: authHeader },\n  json: true,\n});\n\n// CMS защищён BasicAuth; если вдруг не пустит - пробуем Bearer-токен\nlet auth = basic;\nlet data;\ntry {\n  data = toArr(await get(auth, 0));\n} catch (e) {\n  auth = 'Bearer ' + token;\n  data = toArr(await get(auth, 0));\n}\n\nconst all = [];\nlet page = 0;\nwhile (data.length > 0) {\n  all.push(...data);\n  page++;\n  if (page > 2000) throw new Error('Слишком много страниц, остановка');\n  data = toArr(await get(auth, page));\n}\n\n// Защита: пустая выгрузка не должна привести к пометке всех деталей неактивными\nif (all.length === 0) {\n  throw new Error('CMS вернул 0 деталей - синхронизация прервана');\n}\n\n// Убираем дубли по коду (побеждает последняя запись)\nconst byCode = new Map();\nfor (const s of all) byCode.set(s.spareCode, s);\n\nreturn [...byCode.values()].map(s => ({ json: {\n  spare_code: s.spareCode,\n  spare_name: s.spareName ?? null,\n  spare_description: s.spareDescription ?? null,\n  spare_type: s.spareType ?? null,\n  spare_status: s.spareStatus ?? null,\n  price: s.price == null ? null : String(s.price),\n  quantity: s.quantity ?? null,\n  updated_at: s.updatedAt ?? null,\n  last_seen_at: startedAt,\n  is_active: true,\n}}));"
+      },
+      "name": "Fetch CMS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "fb007f3d-a691-4595-b459-7461b9ac13ec"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "spares"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "is_active": false
+          },
+          "matchingColumns": [
+            "spare_code"
+          ],
+          "schema": [
+            {
+              "id": "spare_code",
+              "displayName": "spare_code",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "spare_name",
+              "displayName": "spare_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "spare_description",
+              "displayName": "spare_description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "spare_type",
+              "displayName": "spare_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "spare_status",
+              "displayName": "spare_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "price",
+              "displayName": "price",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "quantity",
+              "displayName": "quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "first_seen_at",
+              "displayName": "first_seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "last_seen_at",
+              "displayName": "last_seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "is_active",
+              "displayName": "is_active",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Upsert Spares",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1104,
+        0
+      ],
+      "id": "f8b16128-08b2-477c-887d-25255e715b1f",
+      "credentials": {
+        "postgres": {
+          "id": "wCBhNZY6XsRDKwQT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE spares SET is_active = false WHERE is_active = true AND last_seen_at < '{{ $('Login').first().json.startedAt }}'::timestamptz;",
+        "options": {}
+      },
+      "name": "Mark Missing Inactive",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1328,
+        0
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "id": "bd564016-6319-44db-9ce9-2fdac0278b00",
+      "credentials": {
+        "postgres": {
+          "id": "wCBhNZY6XsRDKwQT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT spare_code, spare_name, spare_description, spare_type, spare_status, price, quantity, updated_at FROM spares ORDER BY spare_code;",
+        "options": {}
+      },
+      "name": "Select All",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1552,
+        0
+      ],
+      "executeOnce": true,
+      "id": "d0796670-4721-4405-ad14-c121932daa67",
+      "credentials": {
+        "postgres": {
+          "id": "wCBhNZY6XsRDKwQT",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const esc = v => {\n  v = String(v ?? '');\n  return /[;\"\\n\\r]/.test(v) ? '\"' + v.replace(/\"/g, '\"\"') + '\"' : v;\n};\nconst lines = $input.all().map(i => {\n  const r = i.json;\n  return [r.spare_code, r.spare_name, r.spare_description, r.spare_type,\n          r.spare_status, r.price, r.quantity, r.updated_at].map(esc).join(';');\n});\nreturn [{ json: { csv: lines.join('\\n'), rows: lines.length } }];"
+      },
+      "name": "Build CSV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "b6625e20-cbb7-42e0-8fc0-5ec36ba9a52d"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.baseUrl }}/report/csv",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Login').first().json.token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/csv",
+        "body": "={{ $json.csv }}",
+        "options": {}
+      },
+      "name": "Send to Report API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1984,
+        0
+      ],
+      "id": "e8655392-82eb-4fd8-8fd6-bf2cab1ebc2a"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Create Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Table": {
+      "main": [
+        [
+          {
+            "node": "Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login": {
+      "main": [
+        [
+          {
+            "node": "Fetch CMS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch CMS": {
+      "main": [
+        [
+          {
+            "node": "Upsert Spares",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Spares": {
+      "main": [
+        [
+          {
+            "node": "Mark Missing Inactive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Missing Inactive": {
+      "main": [
+        [
+          {
+            "node": "Select All",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select All": {
+      "main": [
+        [
+          {
+            "node": "Build CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build CSV": {
+      "main": [
+        [
+          {
+            "node": "Send to Report API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9bcae0e8-a014-4356-880a-59887a90f51e",
+  "nodeGroups": [],
+  "id": "coetISIQBAYK2UzS",
+  "tags": []
+}

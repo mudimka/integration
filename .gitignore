@@ -1,0 +1,17 @@
+# секреты
+.env
+*.env
+credentials*.json
+
+# данные n8n и Postgres
+.n8n/
+pg_data/
+pgdata/
+
+# мусор
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
